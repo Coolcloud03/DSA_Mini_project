@@ -1,0 +1,8 @@
+com\osmrouter\GeoUtils.class
+com\osmrouter\OSMGraphBuilder$Node.class
+com\osmrouter\OSMGraphBuilder$1.class
+com\osmrouter\OSMGraphBuilder$Edge.class
+com\osmrouter\DijkstraRouter.class
+com\osmrouter\App.class
+com\osmrouter\OSMGraphBuilder$Graph.class
+com\osmrouter\OSMGraphBuilder.class

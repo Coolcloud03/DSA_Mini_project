@@ -1,0 +1,96 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OSM Shortest Path Router</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    .panel { position: absolute; top: 10px; left: 10px; z-index: 1000; background: white; padding: 8px 10px; border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+    .panel input { width: 220px; }
+    .hint { font-size: 12px; color: #666; }
+  </style>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    async function nearest(lat, lon) {
+      const r = await fetch(`/nearest?lat=${lat}&lon=${lon}`);
+      if (!r.ok) throw new Error('nearest failed');
+      return r.json();
+    }
+    async function route(fromId, toId) {
+      const r = await fetch(`/route?from=${fromId}&to=${toId}`);
+      if (!r.ok) throw new Error('route failed');
+      return r.json();
+    }
+    window.addEventListener('DOMContentLoaded', () => {
+      const map = L.map('map').setView([0, 0], 2);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+      let startMarker = null, endMarker = null, line = null;
+      let startNodeId = null, endNodeId = null;
+
+      const setStatus = (msg) => document.getElementById('status').textContent = msg || '';
+
+      map.on('click', async (e) => {
+        try {
+          setStatus('Selecting nearest nodes...');
+          if (!startMarker) {
+            const n = await nearest(e.latlng.lat, e.latlng.lng);
+            startNodeId = n.id;
+            startMarker = L.marker([n.lat, n.lon], { draggable: true }).addTo(map).bindPopup('Start').openPopup();
+            startMarker.on('dragend', async () => {
+              const ll = startMarker.getLatLng();
+              const n2 = await nearest(ll.lat, ll.lng);
+              startNodeId = n2.id;
+              await drawRoute();
+            });
+            setStatus('Start set. Click to select end.');
+          } else if (!endMarker) {
+            const n = await nearest(e.latlng.lat, e.latlng.lng);
+            endNodeId = n.id;
+            endMarker = L.marker([n.lat, n.lon], { draggable: true }).addTo(map).bindPopup('End').openPopup();
+            endMarker.on('dragend', async () => {
+              const ll = endMarker.getLatLng();
+              const n2 = await nearest(ll.lat, ll.lng);
+              endNodeId = n2.id;
+              await drawRoute();
+            });
+            await drawRoute();
+          } else {
+            // reset
+            map.removeLayer(startMarker); map.removeLayer(endMarker);
+            if (line) map.removeLayer(line);
+            startMarker = endMarker = line = null;
+            startNodeId = endNodeId = null;
+            setStatus('Reset. Click to select start.');
+          }
+        } catch (err) {
+          console.error(err);
+          setStatus('Error: ' + err.message);
+        }
+      });
+
+      async function drawRoute() {
+        if (!startNodeId || !endNodeId) return;
+        setStatus('Routing...');
+        const r = await route(startNodeId, endNodeId);
+        const latlngs = r.coordinates.map(c => [c[0], c[1]]);
+        if (line) map.removeLayer(line);
+        line = L.polyline(latlngs, { color: 'blue', weight: 4 }).addTo(map);
+        map.fitBounds(line.getBounds(), { padding: [20, 20] });
+        setStatus(`Route length: ${r.count} points`);
+      }
+    });
+  </script>
+</head>
+<body>
+  <div class="panel">
+    <div><strong>OSM Shortest Path</strong></div>
+    <div class="hint">Click map to pick start and end. Click again to reset.</div>
+    <div id="status" class="hint"></div>
+  </div>
+  <div id="map"></div>
+</body>
+</html>
+
+
