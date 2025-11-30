@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Ride Sharing Matching Demo (v2)</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <style>
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            font-family: Arial, sans-serif;
+        }
+
+        #map {
+            height: 100vh;
+            width: 70%;
+        }
+
+        #sidebar {
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 30%;
+            height: 100vh;
+            background: white;
+            padding: 10px;
+            overflow: auto;
+            z-index: 1000;
+            box-shadow: -2px 0 5px rgba(0, 0, 0, 0.2);
+        }
+
+        #log {
+            height: 300px;
+            overflow: auto;
+            border: 1px solid #ccc;
+            padding: 5px;
+            font-family: monospace;
+            font-size: 12px;
+            background: #f9f9f9;
+        }
+
+        button {
+            margin: 5px 0;
+            padding: 5px 10px;
+        }
+
+        label {
+            display: block;
+            margin: 10px 0;
+        }
+
+        input[type="range"] {
+            width: 150px;
+        }
+
+        .loading {
+            color: orange;
+        }
+
+        .green {
+            color: green;
+        }
+
+        .yellow {
+            color: orange;
+        }
+
+        #session-info {
+            margin: 10px 0;
+            padding: 10px;
+            background: #e9f7ef;
+            border: 1px solid #ccc;
+        }
+
+        #legend {
+            margin-top: 20px;
+            font-size: 11px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="map"></div>
+    <div id="sidebar">
+        <h2>Session Info</h2>
+        <div id="session-info">No session active. Set driver and initial rider to start.</div>
+        <h2>Controls</h2>
+        <div id="controls">
+            <label>Corridor Radius (m): <input type="range" id="radius" min="100" max="5000" value="1000" step="100">
+                <span id="rval">1000</span></label>
+            <label>Detour Cap (m): <input type="range" id="detour" min="1000" max="10000" value="5000" step="500"> <span
+                    id="dval">5000</span></label>
+            <label>Cone Half-Angle (°): <input type="range" id="cone" min="10" max="90" value="45" step="5"> <span
+                    id="cval">45</span></label>
+            <label>Max % Increase: <input type="number" id="maxpct" value="0.5" step="0.1" min="0" max="1"></label>
+            <label>Base Fare: <input type="number" id="basefare" value="0.5" step="0.1" min="0"></label>
+            <label>Price per Meter: <input type="number" id="perm" value="0.001" step="0.0001" min="0"></label>
+            <hr>
+            <button id="setdriver">Set Driver Location</button><br>
+            <button id="addrider">Add Initial Rider</button><br>
+            <button id="addcand" disabled>Add Candidate Rider</button><br>
+            <div>Mode: <span id="curmode">none</span></div>
+            <hr>
+            <button onclick="resetSession()">Reset Session</button>
+            <button onclick="exportScenario()">Export Scenario (JSON)</button>
+            <button onclick="resetSession()">Reset Session</button>
+            <button onclick="exportScenario()">Export Scenario (JSON)</button>
+        </div>
+        <h2>Map Tools</h2>
+        <button id="toggleNodes">🗺️ Show All Nodes</button>
+        <div id="coordinates"
+            style="margin-top: 10px; font-size: 12px; font-family: monospace; background: #f0f0f0; padding: 5px;"></div>
+        <div id="status" style="margin-top: 5px; font-size: 12px; color: #666;"></div>
+        <div id="route-sequence" style="margin-top: 15px; border-top: 1px solid #ccc; padding-top: 10px;">
+            <h3>Route Sequence</h3>
+            <div id="seq-list" style="font-size: 12px;"></div>
+        </div>
+        <hr>
+        <h2>Test Cases</h2>
+        <button onclick="runTest(1)">Test 1: Acceptable B</button><br>
+        <button onclick="runTest(2)">Test 2: Rejected C</button><br>
+        <button onclick="runTest(3)">Test 3: Edge D</button><br>
+        <hr>
+        <h2>Evaluation Log</h2>
+        <div id="log"></div>
+        <div id="legend">
+            <h3>Legend</h3>
+            <ul>
+                <li><strong>Graph-distance vs Straight-line:</strong> All costs use /route (road network) distances, not
+                    Euclidean, for realism.</li>
+                <li><strong>Corridor:</strong> Teal area around route (union of circles, R=1000m default). Pickup must
+                    be inside.</li>
+                <li><strong>Cone:</strong> Yellow wedge at R1 dropoff (90° default). Allows ahead dropoffs outside
+                    corridor.</li>
+                <li><strong>Extra Detour:</strong> New total - baseline; max 5000m. Perms exceeding rejected.</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        // Modular functions as per notes
+        // Utility: distance calculations
+        function haversine(lat1, lon1, lat2, lon2) {
+            const R = 6371000;
+            const φ1 = lat1 * Math.PI / 180; const φ2 = lat2 * Math.PI / 180;
+            const Δφ = (lat2 - lat1) * Math.PI / 180; const Δλ = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
+
+        function polyLength(coords) {
+            let len = 0;
+            for (let i = 1; i < coords.length; i++) len += haversine(coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]);
+            return len;
+        }
+
+        function pointToSegmentDist(px, py, x1, y1, x2, y2) {
+            const A = px - x1; const B = py - y1; const C = x2 - x1; const D = y2 - y1;
+            const dot = A * C + B * D; const lenSq = C * C + D * D;
+            if (lenSq === 0) return haversine(px, py, x1, y1);
+            let param = dot / lenSq; param = Math.max(0, Math.min(1, param));
+            const xx = x1 + param * C; const yy = y1 + param * D;
+            return haversine(px, py, xx, yy);
+        }
+
+        function pointToPolylineDist(point, coords) {
+            if (coords.length < 2) return Infinity;
+            let minDist = Infinity;
+            for (let i = 0; i < coords.length - 1; i++) {
+                const d = pointToSegmentDist(point[0], point[1], coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1]);
+                minDist = Math.min(minDist, d);
+            }
+            return minDist;
+        }
+
+        function computeTangent(routeCoords, dropIdx) {
+            if (dropIdx < 1 || dropIdx >= routeCoords.length - 1) return { tx: 0, ty: 0 };
+            const prev = routeCoords[dropIdx - 1];
+            const curr = routeCoords[dropIdx];
+            return { tx: curr[1] - prev[1], ty: curr[0] - prev[0] };
+        }
+
+        function angleBetween(v1x, v1y, v2x, v2y) {
+            const dot = v1x * v2x + v1y * v2y;
+            const det = v1x * v2y - v1y * v2x;
+            return Math.abs(Math.atan2(det, dot) * 180 / Math.PI);
+        }
+
+        // API calls with LRU cache (simple Map, cap 10000)
+        const routeCache = new Map(); // Key: `${from}_${to}`, Value: {coordinates, length}
+        const MAX_CACHE = 10000;
+
+        async function getNearest(lat, lon) {
+            const res = await fetch(`/nearest?lat=${lat}&lon=${lon}`);
+            if (!res.ok) throw new Error('Nearest failed');
+            return await res.json();
+        }
+
+        async function getRoute(from, to) {
+            const key = `${from}_${to}`;
+            if (routeCache.has(key)) return routeCache.get(key);
+            const res = await fetch(`/route?from=${from}&to=${to}`);
+            if (!res.ok) return null;
+            const data = await res.json();
+            const coords = data.coordinates || [];
+            const len = polyLength(coords);
+            const result = { coordinates: coords, length: len };
+            routeCache.set(key, result);
+            if (routeCache.size > MAX_CACHE) {
+                const firstKey = routeCache.keys().next().value;
+                routeCache.delete(firstKey);
+            }
+            return result;
+        }
+
+        async function getNodes() {
+            const r = await fetch('/nodes');
+            if (!r.ok) throw new Error('nodes failed');
+            return r.json();
+        }
+
+        // Icon generation
+        function getIcon(type, color) {
+            let svg = '';
+            if (type === 'driver') {
+                svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="${color}" width="24" height="24"><path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99zM6.5 16c-.83 0-1.5-.67-1.5-1.5S5.67 13 6.5 13s1.5.67 1.5 1.5S7.33 16 6.5 16zm11 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM5 11l1.5-4.5h11L19 11H5z"/></svg>`;
+            } else if (type === 'pickup') {
+                svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="${color}" width="24" height="24"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/><text x="12" y="8" font-size="8" text-anchor="middle" fill="white" dy=".3em">P</text></svg>`;
+            } else if (type === 'dropoff') {
+                svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="${color}" width="24" height="24"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/><text x="12" y="8" font-size="8" text-anchor="middle" fill="white" dy=".3em">D</text></svg>`;
+            }
+            return L.divIcon({
+                className: 'custom-icon',
+                html: svg,
+                iconSize: [24, 24],
+                iconAnchor: [12, 24],
+                popupAnchor: [0, -24]
+            });
+        }
+
+        const riderColors = ['#F44336', '#4CAF50', '#9C27B0', '#FF9800']; // Red, Green, Purple, Orange
+
+        // Corridor build & check (on-fly dist for check, circles for viz)
+        function buildCorridor(radius) {
+            corridorLayer.clearLayers();
+            if (baseRouteCoords.length < 2) return;
+            // Adjust sample distance based on radius to avoid excessive overlap
+            // A spacing of radius/2 ensures minimal overlap
+            const sampleDist = Math.max(20, radius / 2);
+
+            let prev = baseRouteCoords[0];
+            for (let i = 1; i < baseRouteCoords.length; i++) {
+                const curr = baseRouteCoords[i];
+                const segLen = haversine(prev[0], prev[1], curr[0], curr[1]);
+                for (let d = 0; d < segLen; d += sampleDist) {
+                    const frac = d / segLen;
+                    const ilat = prev[0] + frac * (curr[0] - prev[0]);
+                    const ilon = prev[1] + frac * (curr[1] - prev[1]);
+                    // Stroke false to remove borders, extremely low opacity to handle overlap
+                    L.circle([ilat, ilon], {
+                        radius,
+                        stroke: false,
+                        color: 'teal',
+                        fillOpacity: 0.02,
+                        pane: 'corridorPane'
+                    }).addTo(corridorLayer);
+                }
+                prev = curr;
+            }
+        }
+
+        // Cone visualization
+        function showCone(dropLat, dropLon, tangent, halfAngle, color = 'yellow') {
+            coneLayer.clearLayers();
+            const center = [dropLat, dropLon];
+
+            // Calculate heading from tangent (ty=lat, tx=lon)
+            // atan2 gives angle from East (0) counter-clockwise
+            const standardAngle = Math.atan2(tangent.ty, tangent.tx) * 180 / Math.PI;
+
+            // Convert to Bearing (0=North, 90=East) for the drawing logic below
+            // Bearing = 90 - StandardAngle
+            const bearing = 90 - standardAngle;
+
+            const startAngle = bearing - halfAngle;
+            const endAngle = bearing + halfAngle;
+
+            const radius = 2000; // Arbitrary large for viz
+            const points = [];
+            for (let a = startAngle; a <= endAngle; a += 5) {
+                const rad = (a * Math.PI / 180);
+                // 0 deg = North (cos=1, sin=0)
+                const lat = dropLat + (radius / 6371000) * (180 / Math.PI) * Math.cos(rad);
+                const lon = dropLon + (radius / 6371000) * (180 / Math.PI) / Math.cos(dropLat * Math.PI / 180) * Math.sin(rad);
+                points.push([lat, lon]);
+            }
+            points.push(center);
+            L.polygon(points, { color, fillOpacity: 0.1, weight: 2 }).addTo(coneLayer);
+        }
+
+        // Permutation enumeration (respect P before D, r1 P before D)
+        function enumerateInsertions(assignedRiders, candidate) {
+            const allRiders = [...assignedRiders, candidate];
+            const sequences = [];
+            function recurse(current, remainingPickups, pendingDrops) {
+                if (remainingPickups.length === 0 && pendingDrops.length === 0) {
+                    sequences.push([...current]);
+                    return;
+                }
+                // Try add pickups from remaining
+                for (let i = 0; i < remainingPickups.length; i++) {
+                    if (current.length > 0 && remainingPickups[i].id === 'r1' && current.indexOf(assignedRiders[0].pickup.nodeId) === -1) continue; // r1 P early
+                    const newRem = [...remainingPickups];
+                    const rider = newRem.splice(i, 1)[0];
+                    recurse([...current, rider.pickup.nodeId], newRem, [...pendingDrops, rider]);
+                }
+                // Try add drops from pending
+                for (let i = 0; i < pendingDrops.length; i++) {
+                    const newPend = [...pendingDrops];
+                    const rider = newPend.splice(i, 1)[0];
+                    recurse([...current, rider.dropoff.nodeId], remainingPickups, newPend);
+                }
+            }
+            recurse([], allRiders, []);
+            return sequences;
+        }
+
+        // Compute permutation distance & actuals (async, prune)
+        async function computePermutationDistance(seq, driverNode, baseline, detourCap, cache) {
+            const fullSeq = [driverNode, ...seq];
+            let total = 0;
+            const legLengths = [];
+            for (let i = 0; i < fullSeq.length - 1; i++) {
+                const leg = await getRoute(fullSeq[i], fullSeq[i + 1]);
+                if (!leg) return null;
+                total += leg.length;
+                legLengths.push(leg.length);
+                if (total > baseline + detourCap) return null; // Prune
+            }
+            return { total, legLengths };
+        }
+
+        // Initial route
+        async function computeInitialRoute() {
+            if (!driver || assigned.length === 0) return;
+            const r1 = assigned[0];
+            const leg1 = await getRoute(driver.nodeId, r1.pickup.nodeId);
+            const leg2 = await getRoute(r1.pickup.nodeId, r1.dropoff.nodeId);
+            if (!leg1 || !leg2) return log('Initial route failed');
+            baselineDistance = leg1.length + leg2.length;
+            baseRouteCoords = leg1.coordinates.concat(leg2.coordinates.slice(1));
+            routeLayer.clearLayers();
+            const routeLine = L.polyline(baseRouteCoords, { color: 'blue', weight: 6, pane: 'routePane' }).addTo(routeLayer);
+            const radius = parseInt(document.getElementById('radius').value);
+            buildCorridor(radius);
+            updateSessionInfo();
+            updateRouteSequenceDisplay([driver.nodeId, r1.pickup.nodeId, r1.dropoff.nodeId]);
+            log(`Baseline: ${baselineDistance.toFixed(0)}m`);
+            document.getElementById('addcand').disabled = false;
+        }
+
+        // Candidate evaluation (main function)
+        async function evaluateCandidate(cand) {
+            log(`<div class="loading">Eval ${cand.id}...</div>`);
+            const radius = parseInt(document.getElementById('radius').value);
+            const detourCap = parseInt(document.getElementById('detour').value);
+            const coneAngle = parseInt(document.getElementById('cone').value);
+            const maxPct = parseFloat(document.getElementById('maxpct').value);
+            const r1 = assigned[0];
+
+            // 4) Pickup test
+            const pDist = pointToPolylineDist([cand.pickup.lat, cand.pickup.lon], baseRouteCoords);
+            log(`Pickup dist: ${pDist.toFixed(0)}m`);
+            if (pDist > radius) {
+                cand.status = 'rejected'; cand.reason = 'pickup outside corridor';
+                // L.marker([cand.pickup.lat, cand.pickup.lon], { icon: L.icon({ iconUrl: 'data:image/svg+xml;base64,...red...', iconSize: [12, 12] }) }).addTo(markersLayer).bindPopup(`P${cand.id} (out)`);
+                log(`Reject: pickup outside`);
+                return;
+            }
+            cand.pickup.marker = L.marker([cand.pickup.lat, cand.pickup.lon], { icon: getIcon('pickup', cand.color) }).addTo(markersLayer).bindPopup(`P${cand.id} (in)`);
+
+            // 5) Dropoff filter
+            const sToD1 = await getRoute(driver.nodeId, r1.dropoff.nodeId);
+            const sToD1Dist = sToD1 ? sToD1.length : Infinity;
+            log(`S->D1: ${sToD1Dist.toFixed(0)}m`);
+            const sToDc = await getRoute(driver.nodeId, cand.dropoff.nodeId);
+            const sToDcDist = sToDc ? sToDc.length : Infinity;
+            log(`S->Dc: ${sToDcDist.toFixed(0)}m`);
+            const dDist = pointToPolylineDist([cand.dropoff.lat, cand.dropoff.lon], baseRouteCoords);
+            const dInCorr = dDist <= radius;
+            if (dInCorr) {
+                log('Drop in corridor');
+                cand.dropoff.marker = L.marker([cand.dropoff.lat, cand.dropoff.lon], { icon: getIcon('dropoff', cand.color) }).addTo(markersLayer).bindPopup(`D${cand.id} (in)`);
+            } else if (sToDcDist < sToD1Dist) {
+                cand.status = 'rejected'; cand.reason = 'dropoff before r1 and outside';
+                // L.marker([cand.dropoff.lat, cand.dropoff.lon], { icon: L.icon({ iconUrl: 'data:red', iconSize: [12, 12] }) }).addTo(markersLayer).bindPopup(`D${cand.id} (before)`);
+                log('Reject: before r1 & out');
+                return;
+            } else {
+                // Cone: Direction from R1 Pickup to R1 Dropoff
+                const tangent = { tx: r1.dropoff.lon - r1.pickup.lon, ty: r1.dropoff.lat - r1.pickup.lat };
+                const ang = angleBetween(tangent.tx, tangent.ty, cand.dropoff.lon - r1.dropoff.lon, cand.dropoff.lat - r1.dropoff.lat);
+                log(`Cone angle: ${ang.toFixed(1)}° <= ${coneAngle}°`);
+                showCone(r1.dropoff.lat, r1.dropoff.lon, tangent, coneAngle);
+                if (ang > coneAngle) {
+                    cand.status = 'rejected'; cand.reason = 'outside cone & corridor';
+                    // L.marker([cand.dropoff.lat, cand.dropoff.lon], { icon: L.icon({ iconUrl: 'data:red', iconSize: [12, 12] }) }).addTo(markersLayer).bindPopup(`D${cand.id} (cone)`);
+                    log('Reject: cone');
+                    return;
+                }
+                log('In cone');
+                cand.dropoff.marker = L.marker([cand.dropoff.lat, cand.dropoff.lon], { icon: getIcon('dropoff', cand.color) }).addTo(markersLayer).bindPopup(`D${cand.id}`);
+            }
+
+            // 6-7) Insertions & constraints
+            const seqs = enumerateInsertions(assigned, cand);
+            log(`${seqs.length} seqs generated`);
+            let feasible = [];
+            // Standalone
+            const standalones = {};
+            for (let r of [...assigned, cand]) {
+                const st = await getRoute(r.pickup.nodeId, r.dropoff.nodeId);
+                standalones[r.id] = st ? st.length : Infinity;
+            }
+            for (let seq of seqs) {
+                const distData = await computePermutationDistance(seq, driver.nodeId, baselineDistance, detourCap, routeCache);
+                if (!distData) continue;
+                const { total, legLengths } = distData;
+                const extra = total - baselineDistance;
+                if (extra > detourCap) continue;
+                let maxPct = 0; let actuals = {};
+                let valid = true;
+                for (let r of [...assigned, cand]) {
+                    const pIdx = seq.indexOf(r.pickup.nodeId) + 1; // +1 for driver
+                    const dIdx = seq.indexOf(r.dropoff.nodeId) + 1;
+                    let actual = 0;
+                    for (let k = pIdx; k < dIdx; k++) actual += legLengths[k - 1]; // Adjust idx
+                    actuals[r.id] = actual;
+                    const pct = standalones[r.id] > 0 ? (actual - standalones[r.id]) / standalones[r.id] : 0;
+                    maxPct = Math.max(maxPct, pct);
+                    if (pct > maxPct) valid = false;
+                }
+                if (valid) feasible.push({ seq, total, extra, actuals, maxPct, legLengths });
+            }
+            if (feasible.length === 0) {
+                log('Reject: no feasible');
+                cand.status = 'rejected'; cand.reason = 'no feasible perm';
+                return;
+            }
+            feasible.sort((a, b) => a.extra - b.extra || a.total - b.total);
+            const best = feasible[0];
+            cand.best = best;
+            cand.standalones = standalones;
+            log(`Best: extra ${best.extra.toFixed(0)}m, total ${best.total.toFixed(0)}m, max% ${(best.maxPct * 100).toFixed(1)}%`);
+
+            // Preview the route sequence with this candidate
+            updateRouteSequenceDisplay([driver.nodeId, ...best.seq]);
+
+            // Viz best perm route (dashed)
+            let bestCoords = [];
+            let curr = driver.nodeId;
+            bestCoords = (await getRoute(curr, best.seq[0])).coordinates;
+            for (let i = 1; i < best.seq.length; i++) {
+                const legCoords = (await getRoute(best.seq[i - 1], best.seq[i])).coordinates;
+                bestCoords = bestCoords.concat(legCoords.slice(1));
+            }
+            L.polyline(bestCoords, { color: 'green', weight: 3, dashArray: '10,10' }).addTo(routeLayer).bindPopup('Best insertion');
+
+            // 8) Pricing
+            const baseFare = parseFloat(document.getElementById('basefare').value);
+            const perM = parseFloat(document.getElementById('perm').value);
+            let ask = [];
+            for (let r of [...assigned, cand]) {
+                const actual = best.actuals[r.id];
+                const stand = standalones[r.id];
+                const shared = baseFare + perM * actual;
+                const standP = baseFare + perM * stand;
+                const color = shared <= standP ? 'green' : 'yellow';
+                log(`<span class="${color}">${r.id}: shared $${shared.toFixed(3)} (stand $${standP.toFixed(3)})</span>`);
+                if (shared > standP) ask.push(r.id);
+            }
+            if (ask.length > 0) log(`<span class="yellow">ASK: ${ask.join(', ')}</span>`);
+            cand.status = 'pending';
+            log(`<button onclick="acceptCandidate('${cand.id}')">Accept ${cand.id}</button> <button onclick="rejectCandidate('${cand.id}')">Reject</button>`);
+        }
+
+        // 9) Accept
+        window.acceptCandidate = async function (id) {
+            const idx = candidates.findIndex(c => c.id === id);
+            if (idx < 0 || !candidates[idx].best) return;
+            const cand = candidates[idx];
+            // Animate: simple fade old, add new
+            routeLayer.eachLayer(l => l.setStyle({ opacity: 0.5 }));
+            setTimeout(() => routeLayer.clearLayers(), 500);
+            const best = cand.best;
+            let newCoords = [];
+            let currN = driver.nodeId;
+            const firstLeg = await getRoute(currN, best.seq[0]);
+            newCoords = firstLeg.coordinates;
+            currN = best.seq[0];
+            for (let i = 1; i < best.seq.length; i++) {
+                const leg = await getRoute(currN, best.seq[i]);
+                newCoords = newCoords.concat(leg.coordinates.slice(1));
+                currN = best.seq[i];
+            }
+            baseRouteCoords = newCoords;
+            baselineDistance = best.total;
+            const newRouteLine = L.polyline(newCoords, { color: 'blue', weight: 4, pane: 'routePane' }).addTo(routeLayer);
+            const radius = parseInt(document.getElementById('radius').value);
+            buildCorridor(radius);
+            coneLayer.clearLayers(); // Hide cone
+            assigned.push(cand);
+            candidates.splice(idx, 1);
+            updateSessionInfo();
+            updateRouteSequenceDisplay([driver.nodeId, ...best.seq]);
+            log(`Accepted ${id}`);
+            // Re-eval remaining
+            for (let c of candidates) await evaluateCandidate(c);
+        };
+
+        window.rejectCandidate = function (id) {
+            const idx = candidates.findIndex(c => c.id === id);
+            if (idx < 0) return;
+            const cand = candidates[idx];
+            cand.status = 'rejected';
+            log(`Rejected ${id}: manual`);
+            candidates.splice(idx, 1);
+            // Clean markers
+            if (cand.pickup.marker) map.removeLayer(cand.pickup.marker);
+            if (cand.dropoff.marker) map.removeLayer(cand.dropoff.marker);
+        };
+
+        function updateSessionInfo() {
+            const info = document.getElementById('session-info');
+            info.innerHTML = `Driver: ${driver ? driver.nodeId : 'none'}<br>Assigned: ${assigned.map(r => r.id).join(', ')} (${assigned.length}/3)`;
+        }
+
+        function exportScenario() {
+            const scenario = { driver, assigned: assigned.map(r => ({ id: r.id, pickup: r.pickup, dropoff: r.dropoff })), candidates, baselineDistance };
+            const blob = new Blob([JSON.stringify(scenario, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = 'scenario.json'; a.click();
+        }
+
+        // Map & state
+        let map = L.map('map').setView([18.5314, 73.8446], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+        // Custom panes for z-ordering
+        map.createPane('corridorPane');
+        map.getPane('corridorPane').style.zIndex = 350;
+        map.createPane('routePane');
+        map.getPane('routePane').style.zIndex = 450;
+
+        // Order matters for z-index: first added is bottom
+        let corridorLayer = L.layerGroup().addTo(map);
+        let coneLayer = L.layerGroup().addTo(map);
+        let routeLayer = L.layerGroup().addTo(map);
+        let markersLayer = L.layerGroup().addTo(map);
+        let nodeLayer = null;
+        let driver, assigned = [], candidates = [], baseRouteCoords = [], baselineDistance = 0;
+        let currentMode = 'none';
+        let logEl = document.getElementById('log');
+
+        function log(msg, html = false) {
+            const ts = new Date().toLocaleTimeString();
+            logEl.innerHTML += `<div>[${ts}] ${html ? msg : escapeHtml(msg)}</div>`;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function escapeHtml(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
+
+        window.resetSession = () => {
+            markersLayer.clearLayers(); routeLayer.clearLayers(); corridorLayer.clearLayers(); coneLayer.clearLayers();
+            driver = null; assigned = []; candidates = []; baseRouteCoords = []; baselineDistance = 0; routeCache.clear();
+            currentMode = 'none'; document.getElementById('curmode').textContent = 'none'; logEl.innerHTML = '';
+            document.getElementById('addcand').disabled = true;
+            updateSessionInfo();
+            log('Reset');
+        };
+
+        // Map clicks                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
+        map.on('click', async e => {
+            const { lat, lng } = e.latlng;
+            if (currentMode === 'set_driver') {
+                const snapped = await getNearest(lat, lng);
+                driver = { ...snapped, marker: L.marker([snapped.lat, snapped.lon], { icon: getIcon('driver', '#333') }).addTo(markersLayer).bindPopup('S') };
+                log(`Driver: ${snapped.nodeId}`);
+                updateCoordinatesDisplay(snapped.lat, snapped.lon, 'Driver');
+                currentMode = 'none'; document.getElementById('curmode').textContent = 'none';
+            } else if (currentMode === 'set_pickup') {
+                const snapped = await getNearest(lat, lng);
+                window.tempP = snapped;
+                L.marker([snapped.lat, snapped.lon], { icon: getIcon('pickup', '#999') }).addTo(markersLayer).bindPopup('Temp P');
+                updateCoordinatesDisplay(snapped.lat, snapped.lon, 'Pickup');
+                currentMode = 'set_dropoff'; document.getElementById('curmode').textContent = 'set_dropoff';
+                log('Pickup set, click dropoff');
+            } else if (currentMode === 'set_dropoff') {
+                const snapped = await getNearest(lat, lng);
+                updateCoordinatesDisplay(snapped.lat, snapped.lon, 'Dropoff');
+                const tempP = window.tempP;
+                const riderId = assigned.length === 0 ? 'r1' : `c${candidates.length + 1}`;
+                const color = riderColors[assigned.length + candidates.length];
+                const newRider = {
+                    id: riderId,
+                    color: color,
+                    pickup: { ...tempP, marker: L.marker([tempP.lat, tempP.lon], { icon: getIcon('pickup', color) }).addTo(markersLayer).bindPopup(`P${riderId}`) },
+                    dropoff: { ...snapped, marker: L.marker([snapped.lat, snapped.lon], { icon: getIcon('dropoff', color) }).addTo(markersLayer).bindPopup(`D${riderId}`) }
+                };
+                delete window.tempP;
+                // Remove temp marker
+                markersLayer.eachLayer(l => { if (l.getPopup() && l.getPopup().getContent() === 'Temp P') markersLayer.removeLayer(l); });
+
+                if (assigned.length === 0) {
+                    assigned.push(newRider); await computeInitialRoute();
+                } else if (assigned.length + candidates.length < 3) {
+                    candidates.push(newRider); await evaluateCandidate(newRider);
+                } else {
+                    log('Max 3 riders reached');
+                }
+                currentMode = 'none'; document.getElementById('curmode').textContent = 'none';
+            }
+        });
+
+        // Buttons
+        document.getElementById('setdriver').onclick = () => { currentMode = 'set_driver'; document.getElementById('curmode').textContent = 'set_driver'; };
+        document.getElementById('addrider').onclick = () => { if (assigned.length) return log('Initial set'); currentMode = 'set_pickup'; document.getElementById('curmode').textContent = 'set_pickup'; };
+        document.getElementById('addcand').onclick = () => { if (assigned.length === 0 || assigned.length + candidates.length >= 3) return log('Invalid'); currentMode = 'set_pickup'; document.getElementById('curmode').textContent = 'set_pickup'; };
+
+        document.getElementById('toggleNodes').addEventListener('click', async () => {
+            const btn = document.getElementById('toggleNodes');
+            if (nodeLayer) {
+                map.removeLayer(nodeLayer);
+                nodeLayer = null;
+                btn.textContent = '🗺️ Show All Nodes';
+            } else {
+                btn.textContent = '⏳ Loading...';
+                try {
+                    const nodes = await getNodes();
+                    console.log("Loaded nodes:", nodes.length);
+                    nodeLayer = L.layerGroup();
+                    nodes.forEach(n => {
+                        L.circleMarker([n.lat, n.lon], { radius: 2, color: '#ff5252', fillOpacity: 0.6, stroke: false })
+                            .bindPopup(`Node: ${n.id}`)
+                            .addTo(nodeLayer);
+                    });
+                    nodeLayer.addTo(map);
+                    // Ensure route stays on top
+                    routeLayer.eachLayer(l => l.bringToFront());
+                    btn.textContent = '❌ Hide All Nodes';
+                } catch (e) {
+                    console.error(e);
+                    log('Error loading nodes');
+                    btn.textContent = '🗺️ Show All Nodes';
+                }
+            }
+        });
+
+        function updateCoordinatesDisplay(lat, lon, label) {
+            const div = document.getElementById('coordinates');
+            div.innerHTML = `<strong>${label}:</strong><br>Lat: ${lat.toFixed(5)}<br>Lon: ${lon.toFixed(5)}`;
+        }
+
+        async function updateRouteSequenceDisplay(seq) {
+            const div = document.getElementById('seq-list');
+            div.innerHTML = '<div style="text-align:center; color:#666;">Calculating route details...</div>';
+
+            // Map node IDs to readable names
+            const getName = (id) => {
+                if (driver && driver.nodeId == id) return { name: 'Driver Start', type: 'driver', color: '#333' };
+                // Check both assigned and candidates to show preview names correctly
+                for (let r of [...assigned, ...candidates]) {
+                    if (r.pickup.nodeId == id) return { name: `Pickup ${r.id}`, type: 'pickup', color: r.color };
+                    if (r.dropoff.nodeId == id) return { name: `Dropoff ${r.id}`, type: 'dropoff', color: r.color };
+                }
+                return { name: `Node ${id}`, type: 'node', color: '#666' };
+            };
+
+            let html = '<div style="display: flex; flex-direction: column; gap: 0;">';
+            let totalDist = 0;
+
+            // First Node
+            const startNode = getName(seq[0]);
+            html += `
+                <div style="background: white; border: 1px solid #ddd; border-left: 4px solid ${startNode.color}; padding: 8px; border-radius: 4px; font-weight: bold; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                    ${startNode.name}
+                </div>`;
+
+            for (let i = 0; i < seq.length - 1; i++) {
+                const leg = await getRoute(seq[i], seq[i + 1]);
+                const dist = leg ? leg.length : 0;
+                totalDist += dist;
+
+                // Distance Block (The "Leg")
+                html += `
+                    <div style="display: flex; align-items: center; justify-content: center; padding: 8px 0;">
+                        <div style="background: #e3f2fd; color: #1976d2; padding: 4px 12px; border-radius: 12px; font-size: 11px; font-weight: 600; border: 1px solid #bbdefb;">
+                            ⬇️ ${(dist).toFixed(0)} m
+                        </div>
+                    </div>`;
+
+                // Next Node
+                const nextNode = getName(seq[i + 1]);
+                html += `
+                    <div style="background: white; border: 1px solid #ddd; border-left: 4px solid ${nextNode.color}; padding: 8px; border-radius: 4px; font-weight: bold; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                        ${nextNode.name}
+                    </div>`;
+            }
+            html += '</div>';
+
+            // Total Summary Block
+            html += `
+                <div style="margin-top: 15px; background: #f1f8e9; border: 1px solid #c5e1a5; padding: 10px; border-radius: 6px; text-align: center;">
+                    <div style="font-size: 11px; color: #558b2f; text-transform: uppercase; letter-spacing: 0.5px;">Total Trip Distance</div>
+                    <div style="font-size: 16px; font-weight: 700; color: #33691e;">${(totalDist / 1000).toFixed(2)} km</div>
+                </div>`;
+
+            div.innerHTML = html;
+        }
+
+        // Sliders
+        document.getElementById('radius').oninput = e => { document.getElementById('rval').textContent = e.target.value; if (baseRouteCoords.length) buildCorridor(parseInt(e.target.value)); };
+        document.getElementById('detour').oninput = e => document.getElementById('dval').textContent = e.target.value;
+        document.getElementById('cone').oninput = e => document.getElementById('cval').textContent = e.target.value;
+
+        // Tests
+        const testCases = [
+            { name: 'Acceptable B', driver: [12.9600, 77.5800], r1: [[12.9650, 77.5820], [12.9750, 77.6000]], cand: [[12.9720, 77.5900], [12.9880, 77.6100]] },
+            { name: 'Rejected C', driver: [12.9600, 77.5800], r1: [[12.9650, 77.5820], [12.9750, 77.6000]], cand: [[12.9580, 77.5700], [12.9700, 77.5650]] },
+            { name: 'Edge D', driver: [12.9600, 77.5800], r1: [[12.9650, 77.5820], [12.9750, 77.6000]], cand: [[12.9685, 77.5850], [12.9550, 77.5600]] }
+        ];
+        window.runTest = async num => {
+            resetSession();
+            log(`Test ${num}: ${testCases[num - 1].name}`);
+            const tc = testCases[num - 1];
+            const sSnap = await getNearest(...tc.driver); driver = { ...sSnap, marker: L.marker([sSnap.lat, sSnap.lon]).addTo(markersLayer).bindPopup('S') };
+            const p1Snap = await getNearest(...tc.r1[0]); const d1Snap = await getNearest(...tc.r1[1]);
+            const r1 = { id: 'r1', pickup: { ...p1Snap, marker: L.marker([p1Snap.lat, p1Snap.lon]).addTo(markersLayer).bindPopup('P1') }, dropoff: { ...d1Snap, marker: L.marker([d1Snap.lat, d1Snap.lon]).addTo(markersLayer).bindPopup('D1') } };
+            assigned.push(r1); await computeInitialRoute();
+            const pcSnap = await getNearest(...tc.cand[0]); const dcSnap = await getNearest(...tc.cand[1]);
+            const candR = { id: `test${num}`, pickup: { ...pcSnap }, dropoff: { ...dcSnap } };
+            candidates.push(candR); await evaluateCandidate(candR);
+        };
+
+        log('Demo ready. Set driver/riders via clicks.');
+        updateSessionInfo();
+    </script>
+</body>
+
+</html>
